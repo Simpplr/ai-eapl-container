@@ -1,0 +1,81 @@
+# Use root/example as user/password credentials
+version: '3.1'
+
+services:
+
+  mongo:
+    image: mongo
+    container_name: mongo
+    restart: unless-stopped
+    expose:
+      - 27017
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: example
+    ports:
+      - "27017:27017"
+
+  # mongo-restore:
+  #   image: mongo
+  #   container_name: mongo-restore
+  #   depends_on:
+  #     - mongo
+  #   volumes:
+  #     - "./backup:/data-backup"
+  #   entrypoint: bash -c "chmod +x /data-backup/restore.sh && /data-backup/restore.sh"
+
+  redis:
+    image: redis:7.0
+    container_name: redis
+    ports:
+      - 6379:6379
+
+  elasticsearch:
+    image: elasticsearch:7.17.6
+    container_name: elasticsearch
+    environment:
+      - node.name=es01
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    ports:
+      - 9200:9200
+      - 9300:9300
+
+  eapl:
+    container_name: eapl
+    image: eapl:latest
+    build:
+      context: ./
+      dockerfile: Dockerfile
+    depends_on:
+      - mongo
+      - mongo-restore
+      - redis
+      - elasticsearch
+    volumes:
+      - ./eapl_codebase:/eapl_codebase
+      - ./eapl.env:/eapl_codebase/eapl_ws/eapl_settings/.env
+    ports:
+      - 9454:9454
+    command: [ "python3.8", "/eapl_codebase/eapl_ws/manage.py", "runserver", "0.0.0.0:9454"]
+
+  rqworker:
+    container_name: rqworker
+    image: eapl:latest
+    build:
+      context: ./
+      dockerfile: Dockerfile
+    depends_on:
+      - mongo
+      - mongo-restore
+      - redis
+      - elasticsearch
+    volumes:
+      - ./eapl_codebase:/eapl_codebase
+      - ./eapl.env:/eapl_codebase/eapl_ws/eapl_settings/.env
+    command: [ "python3.8", "/eapl_codebase/eapl_ws/manage.py", "rqworker"]

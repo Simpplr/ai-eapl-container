@@ -1,0 +1,191 @@
+pipeline{
+	agent any
+
+	environment{
+		SMPLR_AI_ML_AWS_AUTO_DOC_PROD_REGION=credentials('smplr_ai_ml_aws_auto_doc_prod_region')
+		SMPLR_AI_ML_AWS_AUTO_DOC_PROD_UPDATE_CODE=credentials('smplr_ai_ml_aws_auto_doc_prod_update_code')
+		SMPLR_AI_ML_AWS_AUTO_DOC_PROD_CREATE_AMI=credentials('smplr_ai_ml_aws_auto_doc_prod_create_ami')
+		SMPLR_AI_ML_AWS_AUTO_DOC_PROD_LAUNCH_TEMPLATE_NAME=credentials('smplr_ai_ml_aws_auto_doc_prod_launch_template_name')
+		SMPLR_AI_ML_AWS_AUTO_DOC_PROD_ASG_NAME=credentials('smplr_ai_ml_aws_auto_doc_prod_asg_name')
+	}
+
+	stages{
+		stage('Launch new EC2 and update code') {
+			steps {
+				withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY', credentialsId: 'aws-iam-creds-deployment-automation-prod']]) {
+					sh '''
+
+					echo "Launch a new EC2 instance"
+					ssm_deployment_automation_prod_update_code=$(aws ssm start-automation-execution --region $SMPLR_AI_ML_AWS_AUTO_DOC_PROD_REGION --document-name $SMPLR_AI_ML_AWS_AUTO_DOC_PROD_UPDATE_CODE)
+
+					echo "Parse output to retrieve automation execution id for launching a new EC2 and updating code"
+					update_code_automation_execution_id=$(echo "$ssm_deployment_automation_prod_update_code" | jq -c '' | jq ".AutomationExecutionId")
+					update_code_automation_execution_id=$(echo "$update_code_automation_execution_id" | tr -d '"')
+
+					echo "Automation Execution ID for launching EC2 and updating code: ${update_code_automation_execution_id}"
+
+					update_code_execution_status=""
+					update_code_execution_status_counter=0
+					update_code_execution_status_success=Success
+					while [ $update_code_execution_status_counter -le 50 ]
+					do
+						echo "Execution status check: ${update_code_execution_status_counter}"
+						update_code_execution_status_output=$(aws ssm get-automation-execution --region $SMPLR_AI_ML_AWS_AUTO_DOC_PROD_REGION --automation-execution-id ${update_code_automation_execution_id})
+
+						update_code_execution_status=$(echo "$update_code_execution_status_output" | grep -Eo '"AutomationExecutionStatus"[^,]*' | grep -Eo '[^:]*$' | tr -d '"' | tr -d ' ')
+
+						if [ "$update_code_execution_status" = "$update_code_execution_status_success" ];
+						then
+							echo "Automation execution with ID: ${update_code_automation_execution_id} is successful for launching EC2 and updating code"
+							
+							echo "Retrieve new EC2 instance id"
+							echo $update_code_execution_status_output > update_code_execution_status_output.json
+							EC2_INSTANCE_ID=$(cat update_code_execution_status_output.json | grep -Eo '"launchInstance.InstanceIds"[^,]*' | grep -Eo '[^:]*$' | tr -d '"' | tr -d '[' | tr -d ']' | tr -d '}' | tr -d ' ')
+
+							echo $EC2_INSTANCE_ID > ec2_instance_id_prod.txt
+
+							break
+						else
+							sleep 30s
+						fi
+
+						update_code_execution_status_counter=$(( update_code_execution_status_counter+1 ))
+					done
+					
+					'''
+				}
+			}
+		}
+
+		stage('Create an AMI') {
+			steps {
+				withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY', credentialsId: 'aws-iam-creds-deployment-automation-prod']]) {
+					sh '''
+					
+					EC2_INSTANCE_ID=`cat ec2_instance_id_prod.txt`
+					echo "Creating an AMI for EC2 instance: $EC2_INSTANCE_ID"
+					ssm_deployment_automation_prod_create_ami=$(aws ssm start-automation-execution --region $SMPLR_AI_ML_AWS_AUTO_DOC_PROD_REGION --document-name $SMPLR_AI_ML_AWS_AUTO_DOC_PROD_CREATE_AMI --parameters "InstanceId=$EC2_INSTANCE_ID")
+
+					echo "Parse output to retrieve automation execution id to create an AMI and terminate instance"
+					create_ami_automation_execution_id=$(echo "$ssm_deployment_automation_prod_create_ami" | jq ".AutomationExecutionId")
+					create_ami_automation_execution_id=$(echo "$create_ami_automation_execution_id" | tr -d '"')
+
+					echo "Automation Execution ID: ${create_ami_automation_execution_id}"
+
+					create_ami_execution_status=""
+					create_ami_execution_status_counter=0
+					NEW_AMI_ID=""
+					create_ami_execution_status_success=Success
+					while [ $create_ami_execution_status_counter -le 30 ]
+					do
+						echo "Execution status check: ${create_ami_execution_status_counter}"
+						create_ami_execution_status_output=$(aws ssm get-automation-execution --region $SMPLR_AI_ML_AWS_AUTO_DOC_PROD_REGION --automation-execution-id ${create_ami_automation_execution_id})
+
+						create_ami_execution_status=$(echo "$create_ami_execution_status_output" | jq ".AutomationExecution.AutomationExecutionStatus")
+						create_ami_execution_status=$(echo "$create_ami_execution_status" | tr -d '"')
+
+						if [ "$create_ami_execution_status" = "$create_ami_execution_status_success" ];
+						then
+							echo "Automation execution with ID: ${create_ami_automation_execution_id} is successful to create an AMI and terminate instance"
+							
+							echo "Parse execution output to retrieve new ami id"
+							NEW_AMI_ID=$(echo "$create_ami_execution_status_output" | jq -r '.AutomationExecution.Outputs["createImage.ImageId"][0]')
+
+							echo "New AMI ID: $NEW_AMI_ID"
+
+							echo $NEW_AMI_ID > new_ami_id_prod.txt
+
+							break
+						else
+							sleep 30s
+						fi
+
+						create_ami_execution_status_counter=$(( create_ami_execution_status_counter+1 ))
+					done
+					
+					'''
+				}
+			}
+		}
+
+		stage("Create a new Launch Template Version") {
+			steps {
+				withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY', credentialsId: 'aws-iam-creds-deployment-automation-prod']]) {
+					sh '''
+
+					NEW_AMI_ID=`cat new_ami_id_prod.txt`
+
+					echo "Retrieving existing launch template versions using AWS CLI"
+					launch_template_versions=$(aws ec2 describe-launch-template-versions --region $SMPLR_AI_ML_AWS_AUTO_DOC_PROD_REGION --launch-template-name $SMPLR_AI_ML_AWS_AUTO_DOC_PROD_LAUNCH_TEMPLATE_NAME)
+					
+					echo "Parse output to identify latest version"
+					latest_launch_template_version=$(echo "$launch_template_versions" | jq '.LaunchTemplateVersions[0].VersionNumber')
+					
+					echo "Latest launch template version: ${latest_launch_template_version}"
+
+					echo "Creating a new launch template using source version as ${latest_launch_template_version}"
+					new_launch_template_version_output=$(aws ec2 create-launch-template-version --region $SMPLR_AI_ML_AWS_AUTO_DOC_PROD_REGION --launch-template-name $SMPLR_AI_ML_AWS_AUTO_DOC_PROD_LAUNCH_TEMPLATE_NAME --source-version ${latest_launch_template_version} --launch-template-data '{"ImageId":"'$NEW_AMI_ID'"}')
+
+					echo "Parse output to identify new version number"
+					new_launch_template_version=$(echo "$new_launch_template_version_output" | jq '.LaunchTemplateVersion.VersionNumber')
+
+					echo "New launch template version: ${new_launch_template_version}"
+
+					echo "Updating default version in launch template"
+					aws ec2 modify-launch-template --region $SMPLR_AI_ML_AWS_AUTO_DOC_PROD_REGION --launch-template-name $SMPLR_AI_ML_AWS_AUTO_DOC_PROD_LAUNCH_TEMPLATE_NAME --default-version ${new_launch_template_version}
+					
+					'''
+				}
+			}
+		}
+
+		stage("Refresh ASG instances") {
+			steps {
+				withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', accessKeyVariable: 'AWS_ACCESS_KEY_ID', secretKeyVariable: 'AWS_SECRET_ACCESS_KEY', credentialsId: 'aws-iam-creds-deployment-automation-prod']]) {
+					sh '''
+
+					echo "Start instance refresh in auto scaling group"
+					aws autoscaling start-instance-refresh --region $SMPLR_AI_ML_AWS_AUTO_DOC_PROD_REGION --auto-scaling-group-name $SMPLR_AI_ML_AWS_AUTO_DOC_PROD_ASG_NAME
+					
+					'''
+				}
+			}
+		}							
+	}
+	
+	//Post section will always run at the end of pipeline execution
+	post{
+		success{
+			//On every successful build email will be send to recipients
+			echo "Build successful on prod server"
+		}
+		always {
+            echo 'Build Completed on prod server'
+            script {
+                slackSend(
+                    color: color_slack_msg(),
+                    botUser: true,
+                    message: "build ${currentBuild.currentResult} on prod server",
+                    channel: "ai-build",
+                    tokenCredentialId: 'SlackAPIToken'
+                )
+            }
+            cleanWs()
+        }
+	}
+}
+
+def color_slack_msg() {
+    switch(currentBuild.currentResult) {
+    case "SUCCESS":
+        return "good"
+        break
+    case "FAILURE":
+    case "UNSTABLE":
+        return "danger"
+        break
+    default:
+        return "warning"
+        break
+    }
+}

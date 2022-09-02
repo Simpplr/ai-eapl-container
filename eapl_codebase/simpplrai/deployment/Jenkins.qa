@@ -1,0 +1,57 @@
+pipeline{
+	agent any
+	environment{
+		EC2_IP = credentials('emplay-qa-ec2-ip')
+	}
+
+	stages{
+		stage('Deploying in EC2'){
+			steps{
+				withCredentials([file(credentialsId: 'emplay-ec2-pem', variable: 'EMPLAY_EC2_PEM')]) {
+					sh """ssh -i $EMPLAY_EC2_PEM ubuntu@${EC2_IP} << EOF
+					cd simpplrai
+					git pull origin qa
+					./deploy.sh
+					"""
+				}
+			}
+		}								
+	}
+	
+	//Post section will always run at the end of pipeline execution
+	//Post section will always run at the end of pipeline execution
+	post{
+		success{
+			//On every successful build email will be send to recipients
+			echo "Build successful on qa server"
+		}
+		always {
+            echo 'Build Completed on qa server'
+            script {
+                slackSend(
+                    color: color_slack_msg(),
+                    botUser: true,
+                    message: "build ${currentBuild.currentResult} on qa server",
+                    channel: "ai-build",
+                    tokenCredentialId: 'SlackAPIToken'
+                )
+            }
+            cleanWs()
+        }
+	}
+}
+
+def color_slack_msg() {
+    switch(currentBuild.currentResult) {
+    case "SUCCESS":
+        return "good"
+        break
+    case "FAILURE":
+    case "UNSTABLE":
+        return "danger"
+        break
+    default:
+        return "warning"
+        break
+    }
+}

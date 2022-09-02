@@ -1,0 +1,12 @@
+version: 0.0
+os: linux
+# files:
+#   - source: /
+#     destination: /home/ubuntu/eapl_ws
+# file_exists_behavior: OVERWRITE   
+
+hooks:
+  AfterInstall:
+    - location : deployment_scripts/after_install.sh
+      timeout: 1200
+      runas: ubuntu
